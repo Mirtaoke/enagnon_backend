@@ -20,6 +20,8 @@ class EnagnonBrandingSeeder extends Seeder
         Operation::where('description', 'like', '% de démonstration')->get()->each(function ($operation) {
             $operation->update(['description' => str_ireplace([' client de démonstration', ' de démonstration'], '', $operation->description)]);
         });
+        Operation::whereIn('description', ['Dépôt client', 'Retrait client', 'Dépôt client de démonstration', 'Retrait client de démonstration'])
+            ->get()->each(fn ($operation) => $operation->update(['description' => $operation->direction === 'in' ? 'Dépôt' : 'Retrait']));
         Report::where('note', 'like', '%démonstration%')->get()->each(function ($report) {
             $report->update(['note' => str_ireplace(' de démonstration', '', $report->note)]);
         });

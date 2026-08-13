@@ -8,6 +8,8 @@ use App\Models\ActivityLog;
 use App\Models\Operation;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Dompdf\Dompdf;
+use Dompdf\Options;
 
 class ReportController extends ApiController
 {
@@ -98,65 +100,15 @@ class ReportController extends ApiController
         $escape = fn ($value) => htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
         $headers = ['Date', 'Caisse ouverture', 'Dépenses', 'Dettes', 'Achats crédit/virtuel', 'Remboursements', 'Moov crédit', 'Flooz', 'MoMo', 'MTN crédit', 'Celtiis', 'Encaissements', 'Décaissements', 'Total du jour', 'Caisse après journée', 'Validé par', 'Détails des opérations'];
         if ($format === 'pdf') {
-            $lines = ['Rapports - '.$shop->name, ''];
-            foreach ($closures as $closure) {
-                $out = (float) collect($closure->expenses ?? [])->sum('amount')
-                    + (float) collect($closure->debts ?? [])->sum('amount')
-                    + (float) $closure->virtual_credit_purchase;
-                $report = $shop->reports()->whereDate('date', $closure->date)->first();
-                $opening = $this->openingBalance($shop->id, $closure->date);
-                $lines[] = str_repeat('=', 76);
-                $lines[] = sprintf('RAPPORT DU %s | Valide par: %s', $closure->date->format('d/m/Y'), $closure->validator?->name ?? 'Non renseigne');
-                $lines[] = str_repeat('-', 76);
-                $lines[] = sprintf('%-24s | %14s | %14s', 'Rubrique', 'Entrees FCFA', 'Sorties FCFA');
-                $lines[] = str_repeat('-', 76);
-                foreach ($this->serviceRows($shop->id, $closure->date) as $row) {
-                    $lines[] = sprintf('%-24s | %14.0f | %14.0f', $row['label'], $row['entries'], $row['outputs']);
-                }
-                $lines[] = str_repeat('-', 76);
-                $lines[] = sprintf('Caisse ouverture: %.0f | Encaissements: %.0f | Decaissements: %.0f', $opening, $report?->total_in ?? 0, $report?->total_out ?? 0);
-                $lines[] = sprintf('TOTAL DU JOUR: %+.0f FCFA | CAISSE APRES JOURNEE: %.0f FCFA', $report?->cash_balance ?? 0, $opening + ($report?->cash_balance ?? 0));
-                $lines[] = str_repeat('-', 76);
-                $lines[] = sprintf('%-7s | %-17s | %-28s | %12s', 'Heure', 'Service', 'Operation', 'Montant');
-                foreach (Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $closure->date)->orderBy('occurred_at')->get() as $operation) {
-                    $sign = $operation->direction === 'out' ? '-' : '+';
-                    $lines[] = sprintf('%-7s | %-17s | %-28s | %s%10.0f', $operation->occurred_at->format('H:i'), $this->serviceLabel($operation), mb_strimwidth($operation->description, 0, 28, '..'), $sign, $operation->amount);
-                }
-                $lines[] = '';
-            }
-            return response($this->simplePdf($lines), 200, ['Content-Type' => 'application/pdf', 'Content-Disposition' => 'attachment; filename="rapports-'.$shop->id.'.pdf"']);
+            $options = new Options();
+            $options->set('defaultFont', 'DejaVu Sans');
+            $dompdf = new Dompdf($options);
+            $dompdf->loadHtml($this->reportHtml($shop, $closures));
+            $dompdf->setPaper('A4', 'portrait');
+            $dompdf->render();
+            return response($dompdf->output(), 200, ['Content-Type' => 'application/pdf', 'Content-Disposition' => 'attachment; filename="rapports-'.$shop->id.'.pdf"']);
         }
-
-        $xml = '<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?>';
-        $xml .= '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="Rapports"><Table><Row>';
-        foreach ($headers as $header) $xml .= '<Cell><Data ss:Type="String">'.$escape($header).'</Data></Cell>';
-        $xml .= '</Row>';
-        foreach ($closures as $closure) {
-            $values = $this->row($closure);
-            $xml .= '<Row>';
-            foreach ($values as $index => $value) {
-                $type = in_array($index, [0, 15, 16], true) ? 'String' : 'Number';
-                $xml .= '<Cell><Data ss:Type="'.$type.'">'.$escape($value ?? '').'</Data></Cell>';
-            }
-            $xml .= '</Row>';
-        }
-        $xml .= '</Table></Worksheet>';
-        if (isset($data['report_id'])) {
-            $report = $shop->reports()->findOrFail($data['report_id']);
-            $operations = Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $report->date)->orderBy('occurred_at')->get();
-            $operationHeaders = ['Heure', 'Service', 'Nature', 'Sens', 'Montant FCFA', 'Numéro', 'Réseau', 'Motif'];
-            $xml .= '<Worksheet ss:Name="Operations"><Table><Row>';
-            foreach ($operationHeaders as $header) $xml .= '<Cell><Data ss:Type="String">'.$escape($header).'</Data></Cell>';
-            $xml .= '</Row>';
-            foreach ($operations as $operation) {
-                $values = [$operation->occurred_at->format('H:i'), $this->serviceLabel($operation), $operation->type, $operation->direction === 'in' ? 'Encaissement' : 'Décaissement', $operation->amount, $operation->phone, $operation->network, $operation->description];
-                $xml .= '<Row>';
-                foreach ($values as $index => $value) $xml .= '<Cell><Data ss:Type="'.($index === 4 ? 'Number' : 'String').'">'.$escape($value ?? '').'</Data></Cell>';
-                $xml .= '</Row>';
-            }
-            $xml .= '</Table></Worksheet>';
-        }
-        $xml .= '</Workbook>';
+        $xml = $this->excelXml($shop, $closures);
         return response($xml, 200, [
             'Content-Type' => 'application/vnd.ms-excel; charset=UTF-8',
             'Content-Disposition' => 'attachment; filename="rapports-'.$shop->id.'.xls"',
@@ -248,6 +200,59 @@ class ReportController extends ApiController
                 'virtual_credit_purchase' => 'Achat credit', default => 'Autres',
             },
         };
+    }
+
+    private function reportHtml(Shop $shop, $closures): string
+    {
+        $pages = '';
+        foreach ($closures as $closure) {
+            $report = Report::where('shop_id', $shop->id)->whereDate('date', $closure->date)->first();
+            $operations = Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $closure->date)->orderBy('occurred_at')->get();
+            $opening = $this->openingBalance($shop->id, $closure->date);
+            $serviceRows = '';
+            foreach ($this->serviceRows($shop->id, $closure->date) as $row) {
+                $serviceRows .= '<tr><td>'.e($row['label']).'</td><td class="in">'.number_format($row['entries'], 0, ',', ' ').'</td><td class="out">'.number_format($row['outputs'], 0, ',', ' ').'</td><td>'.number_format($row['entries'] - $row['outputs'], 0, ',', ' ').'</td></tr>';
+            }
+            $operationRows = '';
+            foreach ($operations as $operation) {
+                $sign = $operation->direction === 'out' ? '-' : '+';
+                $class = $operation->direction === 'out' ? 'out' : 'in';
+                $operationRows .= '<tr><td>'.$operation->occurred_at->format('H:i').'</td><td>'.e($this->serviceLabel($operation)).'</td><td>'.e($operation->direction === 'in' ? 'Encaissement' : 'Décaissement').'</td><td>'.e($operation->description).'</td><td>'.e($operation->phone ?: $operation->network ?: '—').'</td><td class="'.$class.'">'.$sign.number_format($operation->amount, 0, ',', ' ').'</td></tr>';
+            }
+            $total = (float) ($report?->cash_balance ?? 0);
+            $pages .= '<section class="report"><header><div class="brand">ENAGNON LEADER</div><div class="subtitle">Rapport journalier du '.$closure->date->format('d/m/Y').'</div></header>
+                <div class="meta"><div><span>Point de vente</span><strong>'.e($shop->name).'</strong></div><div><span>Validé par</span><strong>'.e($closure->validator?->name ?? 'Non renseigné').'</strong></div><div><span>Validation</span><strong>'.e(optional($closure->submitted_at)->format('d/m/Y H:i') ?? '—').'</strong></div></div>
+                <h2>Situation de la caisse</h2><div class="cards"><div><span>Caisse à l’ouverture</span><b>'.number_format($opening, 0, ',', ' ').' FCFA</b></div><div><span>Total encaissements</span><b class="in">'.number_format($report?->total_in ?? 0, 0, ',', ' ').' FCFA</b></div><div><span>Total décaissements</span><b class="out">'.number_format($report?->total_out ?? 0, 0, ',', ' ').' FCFA</b></div><div><span>Total du jour</span><b class="'.($total < 0 ? 'out' : 'in').'">'.($total >= 0 ? '+' : '').number_format($total, 0, ',', ' ').' FCFA</b></div><div><span>Caisse après journée</span><b>'.number_format($opening + $total, 0, ',', ' ').' FCFA</b></div></div>
+                <h2>Totaux par service</h2><table><thead><tr><th>Service</th><th>Encaissements</th><th>Décaissements</th><th>Solde</th></tr></thead><tbody>'.$serviceRows.'</tbody></table>
+                <h2>Opérations effectuées</h2><table class="ops"><thead><tr><th>Heure</th><th>Service</th><th>Sens</th><th>Motif</th><th>Numéro / réseau</th><th>Montant</th></tr></thead><tbody>'.$operationRows.'</tbody></table>
+                <footer>ENAGNON LEADER • Document généré le '.now()->format('d/m/Y à H:i').'</footer></section>';
+        }
+        return '<!doctype html><html><head><meta charset="UTF-8"><style>@page{margin:24px}*{box-sizing:border-box}body{font-family:DejaVu Sans,sans-serif;color:#17213a;font-size:10px}.report{page-break-after:always}.report:last-child{page-break-after:auto}header{background:#064f82;color:#fff;padding:20px 24px;border-bottom:8px solid #159586}.brand{font-size:25px;font-weight:800;letter-spacing:1px}.subtitle{font-size:13px;margin-top:5px}.meta{display:table;width:100%;background:#eef4fb;padding:12px;margin:14px 0}.meta>div{display:table-cell;width:33%;padding:4px 10px}.meta span,.cards span{display:block;color:#61708b;font-size:8px;text-transform:uppercase;margin-bottom:4px}.meta strong{font-size:10px}h2{font-size:13px;color:#064f82;margin:16px 0 7px;border-left:5px solid #159586;padding-left:8px}.cards{display:table;width:100%;border-spacing:6px}.cards>div{display:table-cell;background:#f5f8fc;border:1px solid #d6dfeb;padding:9px;text-align:center}.cards b{font-size:11px}table{width:100%;border-collapse:collapse;margin-bottom:12px;page-break-inside:auto}thead{display:table-header-group}tr{page-break-inside:avoid}th{background:#159586;color:#fff;padding:7px 5px;border:1px solid #0c756a;text-align:center}td{padding:6px 5px;border:1px solid #cbd4df}tbody tr:nth-child(even){background:#f3f6fa}td:not(:first-child){text-align:right}.ops{font-size:8px}.ops td:nth-child(4){text-align:left}.in{color:#087c66;font-weight:700}.out{color:#c43f4f;font-weight:700}footer{margin-top:15px;padding-top:8px;border-top:1px solid #cbd4df;color:#738096;text-align:center;font-size:8px}</style></head><body>'.$pages.'</body></html>';
+    }
+
+    private function excelXml(Shop $shop, $closures): string
+    {
+        $escape = fn ($value) => htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+        $xml = '<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#159586" ss:Pattern="Solid"/><Alignment ss:Horizontal="Center"/></Style><Style ss:ID="Title"><Font ss:Bold="1" ss:Size="16" ss:Color="#064F82"/></Style><Style ss:ID="Money"><NumberFormat ss:Format="# ##0 \&quot;FCFA\&quot;"/></Style></Styles>';
+        foreach ($closures as $closure) {
+            $report = Report::where('shop_id', $shop->id)->whereDate('date', $closure->date)->first();
+            $opening = $this->openingBalance($shop->id, $closure->date);
+            $name = 'Synthese-'.$closure->date->format('dmY');
+            $xml .= '<Worksheet ss:Name="'.$name.'"><Table><Column ss:Width="180"/><Column ss:Width="120"/><Row><Cell ss:StyleID="Title"><Data ss:Type="String">ENAGNON LEADER</Data></Cell></Row>';
+            foreach ([['Point de vente', $shop->name], ['Date', $closure->date->format('d/m/Y')], ['Validé par', $closure->validator?->name ?? 'Non renseigné'], ['Caisse à l’ouverture', $opening], ['Total encaissements', $report?->total_in ?? 0], ['Total décaissements', $report?->total_out ?? 0], ['Total du jour', $report?->cash_balance ?? 0], ['Caisse après journée', $opening + ($report?->cash_balance ?? 0)]] as $row) {
+                $xml .= '<Row><Cell><Data ss:Type="String">'.$escape($row[0]).'</Data></Cell><Cell'.(is_numeric($row[1]) ? ' ss:StyleID="Money"' : '').'><Data ss:Type="'.(is_numeric($row[1]) ? 'Number' : 'String').'">'.$escape($row[1]).'</Data></Cell></Row>';
+            }
+            $xml .= '</Table></Worksheet><Worksheet ss:Name="Services-'.$closure->date->format('dmY').'"><Table><Row>';
+            foreach (['Service','Encaissements','Décaissements','Solde'] as $header) $xml .= '<Cell ss:StyleID="Header"><Data ss:Type="String">'.$escape($header).'</Data></Cell>';
+            $xml .= '</Row>';
+            foreach ($this->serviceRows($shop->id, $closure->date) as $row) $xml .= '<Row><Cell><Data ss:Type="String">'.$escape($row['label']).'</Data></Cell><Cell ss:StyleID="Money"><Data ss:Type="Number">'.$row['entries'].'</Data></Cell><Cell ss:StyleID="Money"><Data ss:Type="Number">'.$row['outputs'].'</Data></Cell><Cell ss:StyleID="Money"><Data ss:Type="Number">'.($row['entries']-$row['outputs']).'</Data></Cell></Row>';
+            $xml .= '</Table></Worksheet><Worksheet ss:Name="Operations-'.$closure->date->format('dmY').'"><Table><Row>';
+            foreach (['Heure','Service','Sens','Motif','Numéro','Réseau','Montant FCFA'] as $header) $xml .= '<Cell ss:StyleID="Header"><Data ss:Type="String">'.$escape($header).'</Data></Cell>';
+            $xml .= '</Row>';
+            foreach (Operation::where('shop_id',$shop->id)->whereDate('occurred_at',$closure->date)->orderBy('occurred_at')->get() as $operation) $xml .= '<Row><Cell><Data ss:Type="String">'.$operation->occurred_at->format('H:i').'</Data></Cell><Cell><Data ss:Type="String">'.$escape($this->serviceLabel($operation)).'</Data></Cell><Cell><Data ss:Type="String">'.($operation->direction==='in'?'Encaissement':'Décaissement').'</Data></Cell><Cell><Data ss:Type="String">'.$escape($operation->description).'</Data></Cell><Cell><Data ss:Type="String">'.$escape($operation->phone).'</Data></Cell><Cell><Data ss:Type="String">'.$escape($operation->network).'</Data></Cell><Cell ss:StyleID="Money"><Data ss:Type="Number">'.($operation->direction==='out'?-$operation->amount:$operation->amount).'</Data></Cell></Row>';
+            $xml .= '</Table></Worksheet>';
+        }
+        return $xml.'</Workbook>';
     }
 
     private function simplePdf(array $lines): string

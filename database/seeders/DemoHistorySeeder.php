@@ -42,7 +42,7 @@ class DemoHistorySeeder extends Seeder
                             'shop_id' => $shop->id, 'employee_id' => $employee->id, 'user_id' => $user->id,
                             'service' => $service, 'direction' => $direction, 'type' => $type, 'amount' => $amount,
                             'phone' => '019700'.str_pad((string) ($offset * 10 + $index), 4, '0', STR_PAD_LEFT),
-                            'description' => $direction === 'in' ? 'Dépôt client' : 'Retrait client',
+                            'description' => $direction === 'in' ? 'Dépôt' : 'Retrait',
                             'occurred_at' => $date->copy()->setTime(9 + $index, 15),
                         ]);
                         $direction === 'in' ? $totalIn += $amount : $totalOut += $amount;
