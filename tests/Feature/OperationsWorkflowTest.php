@@ -54,8 +54,14 @@ class OperationsWorkflowTest extends TestCase
         $this->withHeaders($adminHeaders)->getJson('/api/summary?month='.today()->format('Y-m'))
             ->assertOk()->assertJsonStructure(['summary' => ['report_count'], 'sales_chart' => [['date', 'entries', 'outputs', 'difference']]]);
         foreach (['pdf' => 'application/pdf', 'xls' => 'application/vnd.ms-excel; charset=UTF-8'] as $format => $type) {
-            $this->withHeaders($adminHeaders)->get("/api/shops/{$shop->id}/reports-export?format={$format}")
+            $response = $this->withHeaders($adminHeaders)->get("/api/shops/{$shop->id}/reports-export?format={$format}")
                 ->assertOk()->assertHeader('Content-Type', $type);
+            if ($format === 'pdf') {
+                $this->assertStringStartsWith('%PDF-', $response->getContent());
+                $this->assertGreaterThan(1000, strlen($response->getContent()));
+            } else {
+                $response->assertSee('Synthese-', false)->assertSee('Services-', false)->assertSee('Operations-', false);
+            }
         }
 
         $this->withHeaders($sellerHeaders)->deleteJson("/api/shops/{$shop->id}/reports/{$report->id}")->assertForbidden();

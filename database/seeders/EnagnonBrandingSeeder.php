@@ -25,5 +25,9 @@ class EnagnonBrandingSeeder extends Seeder
         Report::where('note', 'like', '%démonstration%')->get()->each(function ($report) {
             $report->update(['note' => str_ireplace(' de démonstration', '', $report->note)]);
         });
+        User::where('name', 'like', '%Démo%')->get()->each(function ($user) {
+            $user->update(['name' => str_ireplace([' Démo', 'Démo '], ['', ''], $user->name)]);
+            $user->employee?->update(['name' => $user->name]);
+        });
     }
 }

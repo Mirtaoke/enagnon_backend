@@ -21,7 +21,7 @@ class DemoHistorySeeder extends Seeder
             $employee = $shop->employees()->whereNotNull('user_id')->first();
             if (! $employee) {
                 $user = User::updateOrCreate(['email' => "demo{$shop->id}@enagnon.test"], [
-                    'name' => 'Agent Démo '.$shop->id, 'username' => 'agent_demo_'.$shop->id,
+                    'name' => 'Agent '.$shop->id, 'username' => 'agent_'.$shop->id,
                     'role' => 'seller', 'password' => 'password',
                 ]);
                 $employee = Employee::updateOrCreate(['user_id' => $user->id], [
@@ -84,7 +84,7 @@ class DemoHistorySeeder extends Seeder
                     'departure_at' => $date->copy()->setTime(18, 10 + $offset),
                 ]);
                 ActivityLog::firstOrCreate(['action' => 'report_sent', 'subject_type' => Report::class, 'subject_id' => $report->id], [
-                    'user_id' => $user->id, 'details' => ['demo' => true], 'created_at' => $date->copy()->setTime(19, 5),
+                    'user_id' => $user->id, 'details' => ['historique' => true], 'created_at' => $date->copy()->setTime(19, 5),
                 ]);
             }
         }
