@@ -12,7 +12,7 @@ use App\Models\Shop;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 
-class DemoHistorySeeder extends Seeder
+class HistorySeeder extends Seeder
 {
     public function run(): void
     {
@@ -20,7 +20,7 @@ class DemoHistorySeeder extends Seeder
         foreach (Shop::where('owner_id', $admin->id)->get() as $shop) {
             $employee = $shop->employees()->whereNotNull('user_id')->first();
             if (! $employee) {
-                $user = User::updateOrCreate(['email' => "demo{$shop->id}@enagnon.test"], [
+                $user = User::updateOrCreate(['email' => "historique{$shop->id}@enagnon.test"], [
                     'name' => 'Agent '.$shop->id, 'username' => 'agent_'.$shop->id,
                     'role' => 'seller', 'password' => 'password',
                 ]);

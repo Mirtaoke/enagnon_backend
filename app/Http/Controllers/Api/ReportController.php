@@ -100,13 +100,31 @@ class ReportController extends ApiController
         $escape = fn ($value) => htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
         $headers = ['Date', 'Caisse ouverture', 'Dépenses', 'Dettes', 'Achats crédit/virtuel', 'Remboursements', 'Moov crédit', 'Flooz', 'MoMo', 'MTN crédit', 'Celtiis', 'Encaissements', 'Décaissements', 'Total du jour', 'Caisse après journée', 'Validé par', 'Détails des opérations'];
         if ($format === 'pdf') {
-            $options = new Options();
-            $options->set('defaultFont', 'DejaVu Sans');
-            $dompdf = new Dompdf($options);
-            $dompdf->loadHtml($this->reportHtml($shop, $closures));
-            $dompdf->setPaper('A4', 'portrait');
-            $dompdf->render();
-            return response($dompdf->output(), 200, ['Content-Type' => 'application/pdf', 'Content-Disposition' => 'attachment; filename="rapports-'.$shop->id.'.pdf"']);
+            try {
+                $options = new Options();
+                $options->set('defaultFont', 'DejaVu Sans');
+                $dompdf = new Dompdf($options);
+                $dompdf->loadHtml($this->reportHtml($shop, $closures), 'UTF-8');
+                $dompdf->setPaper('A4', 'portrait');
+                $dompdf->render();
+                $pdf = $dompdf->output();
+                throw_if(! str_starts_with($pdf, '%PDF-'), new \RuntimeException('Le document PDF généré est invalide.'));
+            } catch (\Throwable $exception) {
+                report($exception);
+                $lines = ['Point de vente : '.$shop->name];
+                foreach ($closures as $closure) {
+                    $report = Report::where('shop_id', $shop->id)->whereDate('date', $closure->date)->first();
+                    $lines[] = 'Rapport du '.$closure->date->format('d/m/Y');
+                    $lines[] = 'Encaissements : '.number_format($report?->total_in ?? 0, 0, ',', ' ').' FCFA';
+                    $lines[] = 'Décaissements : '.number_format($report?->total_out ?? 0, 0, ',', ' ').' FCFA';
+                    $lines[] = 'Total du jour : '.number_format($report?->cash_balance ?? 0, 0, ',', ' ').' FCFA';
+                    foreach (Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $closure->date)->orderBy('occurred_at')->get() as $operation) {
+                        $lines[] = sprintf('%s | %s | %s %.0f FCFA | %s', $operation->occurred_at->format('H:i'), $this->serviceLabel($operation), $operation->direction === 'out' ? '-' : '+', $operation->amount, $operation->description ?: 'Sans motif');
+                    }
+                }
+                $pdf = $this->simplePdf($lines);
+            }
+            return response($pdf, 200, ['Content-Type' => 'application/pdf', 'Content-Length' => strlen($pdf), 'Content-Disposition' => 'attachment; filename="rapports-'.$shop->id.'.pdf"']);
         }
         $xml = $this->excelXml($shop, $closures);
         return response($xml, 200, [
@@ -217,14 +235,14 @@ class ReportController extends ApiController
             foreach ($operations as $operation) {
                 $sign = $operation->direction === 'out' ? '-' : '+';
                 $class = $operation->direction === 'out' ? 'out' : 'in';
-                $operationRows .= '<tr><td>'.$operation->occurred_at->format('H:i').'</td><td>'.e($this->serviceLabel($operation)).'</td><td>'.e($operation->direction === 'in' ? 'Encaissement' : 'Décaissement').'</td><td>'.e($operation->description).'</td><td>'.e($operation->phone ?: $operation->network ?: '—').'</td><td class="'.$class.'">'.$sign.number_format($operation->amount, 0, ',', ' ').'</td></tr>';
+                $operationRows .= '<tr><td>'.$operation->occurred_at->format('H:i').'</td><td>'.e($this->serviceLabel($operation)).'</td><td>'.e($operation->direction === 'in' ? 'Encaissement' : 'Décaissement').'</td><td>'.e($operation->description).'</td><td>'.e($operation->phone ?: '—').'</td><td class="'.$class.'">'.$sign.number_format($operation->amount, 0, ',', ' ').'</td></tr>';
             }
             $total = (float) ($report?->cash_balance ?? 0);
             $pages .= '<section class="report"><header><div class="brand">ENAGNON LEADER</div><div class="subtitle">Rapport journalier du '.$closure->date->format('d/m/Y').'</div></header>
                 <div class="meta"><div><span>Point de vente</span><strong>'.e($shop->name).'</strong></div><div><span>Validé par</span><strong>'.e($closure->validator?->name ?? 'Non renseigné').'</strong></div><div><span>Validation</span><strong>'.e(optional($closure->submitted_at)->format('d/m/Y H:i') ?? '—').'</strong></div></div>
                 <h2>Situation de la caisse</h2><div class="cards"><div><span>Caisse à l’ouverture</span><b>'.number_format($opening, 0, ',', ' ').' FCFA</b></div><div><span>Total encaissements</span><b class="in">'.number_format($report?->total_in ?? 0, 0, ',', ' ').' FCFA</b></div><div><span>Total décaissements</span><b class="out">'.number_format($report?->total_out ?? 0, 0, ',', ' ').' FCFA</b></div><div><span>Total du jour</span><b class="'.($total < 0 ? 'out' : 'in').'">'.($total >= 0 ? '+' : '').number_format($total, 0, ',', ' ').' FCFA</b></div><div><span>Caisse après journée</span><b>'.number_format($opening + $total, 0, ',', ' ').' FCFA</b></div></div>
                 <h2>Totaux par service</h2><table><thead><tr><th>Service</th><th>Encaissements</th><th>Décaissements</th><th>Solde</th></tr></thead><tbody>'.$serviceRows.'</tbody></table>
-                <h2>Opérations effectuées</h2><table class="ops"><thead><tr><th>Heure</th><th>Service</th><th>Sens</th><th>Motif</th><th>Numéro / réseau</th><th>Montant</th></tr></thead><tbody>'.$operationRows.'</tbody></table>
+                <h2>Opérations effectuées</h2><table class="ops"><thead><tr><th>Heure</th><th>Service</th><th>Sens</th><th>Motif</th><th>Numéro</th><th>Montant</th></tr></thead><tbody>'.$operationRows.'</tbody></table>
                 <footer>ENAGNON LEADER • Document généré le '.now()->format('d/m/Y à H:i').'</footer></section>';
         }
         return '<!doctype html><html><head><meta charset="UTF-8"><style>@page{margin:24px}*{box-sizing:border-box}body{font-family:DejaVu Sans,sans-serif;color:#17213a;font-size:10px}.report{page-break-after:always}.report:last-child{page-break-after:auto}header{background:#064f82;color:#fff;padding:20px 24px;border-bottom:8px solid #159586}.brand{font-size:25px;font-weight:800;letter-spacing:1px}.subtitle{font-size:13px;margin-top:5px}.meta{display:table;width:100%;background:#eef4fb;padding:12px;margin:14px 0}.meta>div{display:table-cell;width:33%;padding:4px 10px}.meta span,.cards span{display:block;color:#61708b;font-size:8px;text-transform:uppercase;margin-bottom:4px}.meta strong{font-size:10px}h2{font-size:13px;color:#064f82;margin:16px 0 7px;border-left:5px solid #159586;padding-left:8px}.cards{display:table;width:100%;border-spacing:6px}.cards>div{display:table-cell;background:#f5f8fc;border:1px solid #d6dfeb;padding:9px;text-align:center}.cards b{font-size:11px}table{width:100%;border-collapse:collapse;margin-bottom:12px;page-break-inside:auto}thead{display:table-header-group}tr{page-break-inside:avoid}th{background:#159586;color:#fff;padding:7px 5px;border:1px solid #0c756a;text-align:center}td{padding:6px 5px;border:1px solid #cbd4df}tbody tr:nth-child(even){background:#f3f6fa}td:not(:first-child){text-align:right}.ops{font-size:8px}.ops td:nth-child(4){text-align:left}.in{color:#087c66;font-weight:700}.out{color:#c43f4f;font-weight:700}footer{margin-top:15px;padding-top:8px;border-top:1px solid #cbd4df;color:#738096;text-align:center;font-size:8px}</style></head><body>'.$pages.'</body></html>';
