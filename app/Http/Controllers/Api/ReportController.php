@@ -8,8 +8,6 @@ use App\Models\ActivityLog;
 use App\Models\Operation;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Dompdf\Dompdf;
-use Dompdf\Options;
 
 class ReportController extends ApiController
 {
@@ -100,30 +98,27 @@ class ReportController extends ApiController
         $escape = fn ($value) => htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
         $headers = ['Date', 'Caisse ouverture', 'Dépenses', 'Dettes', 'Achats crédit/virtuel', 'Remboursements', 'Moov crédit', 'Flooz', 'MoMo', 'MTN crédit', 'Celtiis', 'Encaissements', 'Décaissements', 'Total du jour', 'Caisse après journée', 'Validé par', 'Détails des opérations'];
         if ($format === 'pdf') {
-            try {
-                $options = new Options();
-                $options->set('defaultFont', 'DejaVu Sans');
-                $dompdf = new Dompdf($options);
-                $dompdf->loadHtml($this->reportHtml($shop, $closures), 'UTF-8');
-                $dompdf->setPaper('A4', 'portrait');
-                $dompdf->render();
-                $pdf = $dompdf->output();
-                throw_if(! str_starts_with($pdf, '%PDF-'), new \RuntimeException('Le document PDF généré est invalide.'));
-            } catch (\Throwable $exception) {
-                report($exception);
-                $lines = ['Point de vente : '.$shop->name];
-                foreach ($closures as $closure) {
-                    $report = Report::where('shop_id', $shop->id)->whereDate('date', $closure->date)->first();
-                    $lines[] = 'Rapport du '.$closure->date->format('d/m/Y');
-                    $lines[] = 'Encaissements : '.number_format($report?->total_in ?? 0, 0, ',', ' ').' FCFA';
-                    $lines[] = 'Décaissements : '.number_format($report?->total_out ?? 0, 0, ',', ' ').' FCFA';
-                    $lines[] = 'Total du jour : '.number_format($report?->cash_balance ?? 0, 0, ',', ' ').' FCFA';
-                    foreach (Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $closure->date)->orderBy('occurred_at')->get() as $operation) {
-                        $lines[] = sprintf('%s | %s | %s %.0f FCFA | %s', $operation->occurred_at->format('H:i'), $this->serviceLabel($operation), $operation->direction === 'out' ? '-' : '+', $operation->amount, $operation->description ?: 'Sans motif');
-                    }
+            $lines = ['POINT DE VENTE | '.$shop->name];
+            foreach ($closures as $closure) {
+                $report = Report::where('shop_id', $shop->id)->whereDate('date', $closure->date)->first();
+                $opening = $this->openingBalance($shop->id, $closure->date);
+                $lines[] = 'RAPPORT | '.$closure->date->format('d/m/Y').' | Valide par '.($closure->validator?->name ?? 'Non renseigne');
+                $lines[] = 'SITUATION DE LA CAISSE | MONTANT';
+                $lines[] = 'Caisse a l ouverture | '.number_format($opening, 0, ',', ' ').' FCFA';
+                $lines[] = 'Total encaissements | '.number_format($report?->total_in ?? 0, 0, ',', ' ').' FCFA';
+                $lines[] = 'Total decaissements | '.number_format($report?->total_out ?? 0, 0, ',', ' ').' FCFA';
+                $lines[] = 'Total du jour | '.number_format($report?->cash_balance ?? 0, 0, ',', ' ').' FCFA';
+                $lines[] = 'Caisse apres la journee | '.number_format($opening + ($report?->cash_balance ?? 0), 0, ',', ' ').' FCFA';
+                $lines[] = 'SERVICE | ENCAISSEMENTS | DECAISSEMENTS | SOLDE';
+                foreach ($this->serviceRows($shop->id, $closure->date) as $row) {
+                    $lines[] = $row['label'].' | '.number_format($row['entries'], 0, ',', ' ').' | '.number_format($row['outputs'], 0, ',', ' ').' | '.number_format($row['entries'] - $row['outputs'], 0, ',', ' ');
                 }
-                $pdf = $this->simplePdf($lines);
+                $lines[] = 'HEURE | SERVICE | SENS | MOTIF | NUMERO | MONTANT';
+                foreach (Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $closure->date)->orderBy('occurred_at')->get() as $operation) {
+                    $lines[] = sprintf('%s | %s | %s | %s | %s | %s%.0f', $operation->occurred_at->format('H:i'), $this->serviceLabel($operation), $operation->direction === 'in' ? 'Encaissement' : 'Decaissement', $operation->description ?: 'Sans motif', $operation->phone ?: '-', $operation->direction === 'out' ? '-' : '+', $operation->amount);
+                }
             }
+            $pdf = $this->simplePdf($lines);
             return response($pdf, 200, ['Content-Type' => 'application/pdf', 'Content-Length' => strlen($pdf), 'Content-Disposition' => 'attachment; filename="rapports-'.$shop->id.'.pdf"']);
         }
         $xml = $this->excelXml($shop, $closures);
@@ -276,9 +271,20 @@ class ReportController extends ApiController
     private function simplePdf(array $lines): string
     {
         $text = "0.02 0.31 0.54 rg 25 760 545 62 re f 1 1 1 rg BT /F1 18 Tf 42 796 Td (ENAGNON LEADER) Tj 0 -24 Td /F1 11 Tf (Rapport detaille des operations) Tj ET 0.08 0.12 0.18 rg BT /F1 9 Tf 35 742 Td 12 TL ";
-        foreach (array_slice($lines, 0, 58) as $line) {
+        $y = 735;
+        foreach (array_slice($lines, 0, 51) as $index => $line) {
             $ascii = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $line) ?: '';
-            $text .= '('.str_replace(['\\', '(', ')'], ['\\\\', '\\(', '\\)'], $ascii).") Tj T* ";
+            $ascii = mb_strimwidth($ascii, 0, 92, '...');
+            $escaped = str_replace(['\\', '(', ')'], ['\\\\', '\\(', '\\)'], $ascii);
+            $isHeader = str_contains($ascii, 'SITUATION DE LA CAISSE') || str_starts_with($ascii, 'SERVICE |') || str_starts_with($ascii, 'HEURE |');
+            if (str_contains($ascii, '|')) {
+                $fill = $isHeader ? '0.08 0.56 0.51' : ($index % 2 === 0 ? '0.94 0.97 0.99' : '1 1 1');
+                $color = $isHeader ? '1 1 1' : '0.08 0.12 0.18';
+                $text .= 'ET '.$fill.' rg 30 '.($y - 3).' 535 12 re f 0.78 0.82 0.87 RG 30 '.($y - 3).' 535 12 re S '.$color.' rg BT /F1 '.($isHeader ? '7' : '6.5').' Tf 35 '.$y.' Td ('.$escaped.') Tj ';
+            } else {
+                $text .= '('.$escaped.") Tj T* ";
+            }
+            $y -= 12;
         }
         $text .= 'ET';
         $objects = [
