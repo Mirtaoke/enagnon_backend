@@ -21,8 +21,8 @@ class AuthController extends ApiController
             'email' => $data['email'], 'code' => Hash::make($code),
             'expires_at' => now()->addMinutes(15), 'created_at' => now(), 'updated_at' => now(),
         ]);
-        Mail::raw("Votre code MultiShop est : {$code}. Il expire dans 15 minutes.", function ($message) use ($data) {
-            $message->to($data['email'])->subject('Code de récupération MultiShop');
+        Mail::raw("Votre code ENAGNON LEADER est : {$code}. Il expire dans 15 minutes.", function ($message) use ($data) {
+            $message->to($data['email'])->subject('Code de récupération ENAGNON LEADER');
         });
         return $this->resource(['message' => 'Un code de récupération a été envoyé à votre adresse email.']);
     }

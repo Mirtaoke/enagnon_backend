@@ -63,6 +63,16 @@ class ReportController extends ApiController
             ],
             'operation_details' => $operations->map(fn ($operation) => [
                 'service' => $operation->service, 'direction' => $operation->direction,
+                'service_label' => match ($operation->service) {
+                    'momo' => 'MoMo', 'flooz' => 'Flooz', 'mtn_credit' => 'MTN crédit',
+                    'moov_credit' => 'Moov crédit', 'celtiis' => 'Celtiis',
+                    default => match ($operation->type) {
+                        'expense' => 'Dépense', 'debt' => 'Dette',
+                        'debt_repayment' => 'Remboursement',
+                        'virtual_credit_purchase' => 'Achat crédit / virtuel',
+                        default => 'Autres',
+                    },
+                },
                 'type' => $operation->type, 'amount' => $operation->amount,
                 'phone' => $operation->phone, 'network' => $operation->network,
                 'description' => $operation->description,
@@ -86,7 +96,7 @@ class ReportController extends ApiController
             })->with('validator:id,name')->orderByDesc('date')->get();
         abort_if($closures->isEmpty(), 422, 'Aucun rapport validé à exporter.');
         $escape = fn ($value) => htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
-        $headers = ['Date', 'Dépenses', 'Dettes', 'Achats crédit/virtuel', 'Remboursements', 'Moov crédit', 'Flooz', 'MoMo', 'MTN crédit', 'Celtiis', 'Encaissements', 'Décaissements', 'Total du jour', 'Validé par', 'Détails des opérations'];
+        $headers = ['Date', 'Caisse ouverture', 'Dépenses', 'Dettes', 'Achats crédit/virtuel', 'Remboursements', 'Moov crédit', 'Flooz', 'MoMo', 'MTN crédit', 'Celtiis', 'Encaissements', 'Décaissements', 'Total du jour', 'Caisse après journée', 'Validé par', 'Détails des opérations'];
         if ($format === 'pdf') {
             $lines = ['Rapports - '.$shop->name, ''];
             foreach ($closures as $closure) {
@@ -94,11 +104,23 @@ class ReportController extends ApiController
                     + (float) collect($closure->debts ?? [])->sum('amount')
                     + (float) $closure->virtual_credit_purchase;
                 $report = $shop->reports()->whereDate('date', $closure->date)->first();
-                $lines[] = sprintf('%s | Encaissements: %.0f | Decaissements: %.0f | Total: %.0f FCFA', $closure->date->format('d/m/Y'), $report?->total_in ?? 0, $report?->total_out ?? 0, $report?->cash_balance ?? 0);
-                $lines[] = 'Valide par: '.($closure->validator?->name ?? 'Non renseigne');
+                $opening = $this->openingBalance($shop->id, $closure->date);
+                $lines[] = str_repeat('=', 76);
+                $lines[] = sprintf('RAPPORT DU %s | Valide par: %s', $closure->date->format('d/m/Y'), $closure->validator?->name ?? 'Non renseigne');
+                $lines[] = str_repeat('-', 76);
+                $lines[] = sprintf('%-24s | %14s | %14s', 'Rubrique', 'Entrees FCFA', 'Sorties FCFA');
+                $lines[] = str_repeat('-', 76);
+                foreach ($this->serviceRows($shop->id, $closure->date) as $row) {
+                    $lines[] = sprintf('%-24s | %14.0f | %14.0f', $row['label'], $row['entries'], $row['outputs']);
+                }
+                $lines[] = str_repeat('-', 76);
+                $lines[] = sprintf('Caisse ouverture: %.0f | Encaissements: %.0f | Decaissements: %.0f', $opening, $report?->total_in ?? 0, $report?->total_out ?? 0);
+                $lines[] = sprintf('TOTAL DU JOUR: %+.0f FCFA | CAISSE APRES JOURNEE: %.0f FCFA', $report?->cash_balance ?? 0, $opening + ($report?->cash_balance ?? 0));
+                $lines[] = str_repeat('-', 76);
+                $lines[] = sprintf('%-7s | %-17s | %-28s | %12s', 'Heure', 'Service', 'Operation', 'Montant');
                 foreach (Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $closure->date)->orderBy('occurred_at')->get() as $operation) {
                     $sign = $operation->direction === 'out' ? '-' : '+';
-                    $lines[] = sprintf('  %s %.0f | %s | %s%s', $sign, $operation->amount, $operation->description, $operation->phone ? $operation->phone.' | ' : '', $operation->occurred_at->format('H:i'));
+                    $lines[] = sprintf('%-7s | %-17s | %-28s | %s%10.0f', $operation->occurred_at->format('H:i'), $this->serviceLabel($operation), mb_strimwidth($operation->description, 0, 28, '..'), $sign, $operation->amount);
                 }
                 $lines[] = '';
             }
@@ -113,12 +135,28 @@ class ReportController extends ApiController
             $values = $this->row($closure);
             $xml .= '<Row>';
             foreach ($values as $index => $value) {
-                $type = in_array($index, [0, 13, 14], true) ? 'String' : 'Number';
+                $type = in_array($index, [0, 15, 16], true) ? 'String' : 'Number';
                 $xml .= '<Cell><Data ss:Type="'.$type.'">'.$escape($value ?? '').'</Data></Cell>';
             }
             $xml .= '</Row>';
         }
-        $xml .= '</Table></Worksheet></Workbook>';
+        $xml .= '</Table></Worksheet>';
+        if (isset($data['report_id'])) {
+            $report = $shop->reports()->findOrFail($data['report_id']);
+            $operations = Operation::where('shop_id', $shop->id)->whereDate('occurred_at', $report->date)->orderBy('occurred_at')->get();
+            $operationHeaders = ['Heure', 'Service', 'Nature', 'Sens', 'Montant FCFA', 'Numéro', 'Réseau', 'Motif'];
+            $xml .= '<Worksheet ss:Name="Operations"><Table><Row>';
+            foreach ($operationHeaders as $header) $xml .= '<Cell><Data ss:Type="String">'.$escape($header).'</Data></Cell>';
+            $xml .= '</Row>';
+            foreach ($operations as $operation) {
+                $values = [$operation->occurred_at->format('H:i'), $this->serviceLabel($operation), $operation->type, $operation->direction === 'in' ? 'Encaissement' : 'Décaissement', $operation->amount, $operation->phone, $operation->network, $operation->description];
+                $xml .= '<Row>';
+                foreach ($values as $index => $value) $xml .= '<Cell><Data ss:Type="'.($index === 4 ? 'Number' : 'String').'">'.$escape($value ?? '').'</Data></Cell>';
+                $xml .= '</Row>';
+            }
+            $xml .= '</Table></Worksheet>';
+        }
+        $xml .= '</Workbook>';
         return response($xml, 200, [
             'Content-Type' => 'application/vnd.ms-excel; charset=UTF-8',
             'Content-Disposition' => 'attachment; filename="rapports-'.$shop->id.'.xls"',
@@ -173,14 +211,43 @@ class ReportController extends ApiController
     {
         $operations = Operation::where('shop_id', $closure->shop_id)->whereDate('occurred_at', $closure->date)->get();
         $report = Report::where('shop_id', $closure->shop_id)->whereDate('date', $closure->date)->first();
+        $opening = $this->openingBalance($closure->shop_id, $closure->date);
         return [
-            $closure->date->format('d/m/Y'), $operations->where('type', 'expense')->sum('amount'),
+            $closure->date->format('d/m/Y'), $opening, $operations->where('type', 'expense')->sum('amount'),
             $operations->where('type', 'debt')->sum('amount'), $operations->where('type', 'virtual_credit_purchase')->sum('amount'),
             $operations->where('type', 'debt_repayment')->sum('amount'), $closure->moov_credit, $closure->flooz,
             $closure->momo, $closure->mtn_credit, $closure->celtiis, $report?->total_in ?? 0,
-            $report?->total_out ?? 0, $report?->cash_balance ?? 0, $closure->validator?->name ?? '',
+            $report?->total_out ?? 0, $report?->cash_balance ?? 0, $opening + ($report?->cash_balance ?? 0), $closure->validator?->name ?? '',
             $operations->map(fn ($operation) => sprintf('%s %.0f - %s%s', $operation->direction === 'out' ? '-' : '+', $operation->amount, $operation->description, $operation->phone ? ' ('.$operation->phone.')' : ''))->implode(' | '),
         ];
+    }
+
+    private function openingBalance(int $shopId, $date): float
+    {
+        return round((float) Operation::where('shop_id', $shopId)->where('occurred_at', '<', $date->copy()->startOfDay())
+            ->selectRaw("SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END) as balance")->value('balance'), 2);
+    }
+
+    private function serviceRows(int $shopId, $date): array
+    {
+        $operations = Operation::where('shop_id', $shopId)->whereDate('occurred_at', $date)->get();
+        $definitions = ['expense' => 'Dépenses', 'debt' => 'Dettes', 'debt_repayment' => 'Remboursements', 'virtual_credit_purchase' => 'Achat crédit/virtuel', 'moov_credit' => 'Moov crédit', 'flooz' => 'Flooz', 'momo' => 'MoMo', 'mtn_credit' => 'MTN crédit', 'celtiis' => 'Celtiis'];
+        return collect($definitions)->map(function ($label, $key) use ($operations) {
+            $items = in_array($key, ['expense', 'debt', 'debt_repayment', 'virtual_credit_purchase'], true) ? $operations->where('type', $key) : $operations->where('service', $key);
+            return ['label' => $label, 'entries' => (float) $items->where('direction', 'in')->sum('amount'), 'outputs' => (float) $items->where('direction', 'out')->sum('amount')];
+        })->values()->all();
+    }
+
+    private function serviceLabel(Operation $operation): string
+    {
+        return match ($operation->service) {
+            'momo' => 'MoMo', 'flooz' => 'Flooz', 'mtn_credit' => 'MTN credit',
+            'moov_credit' => 'Moov credit', 'celtiis' => 'Celtiis',
+            default => match ($operation->type) {
+                'expense' => 'Depense', 'debt' => 'Dette', 'debt_repayment' => 'Remboursement',
+                'virtual_credit_purchase' => 'Achat credit', default => 'Autres',
+            },
+        };
     }
 
     private function simplePdf(array $lines): string
@@ -196,7 +263,7 @@ class ReportController extends ApiController
             '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
             '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
             '<< /Length '.strlen($text).' >> stream' . "\n" . $text . "\nendstream",
-            '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+            '<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>',
         ];
         $pdf = "%PDF-1.4\n"; $offsets = [0];
         foreach ($objects as $index => $object) { $offsets[] = strlen($pdf); $pdf .= ($index + 1)." 0 obj\n{$object}\nendobj\n"; }

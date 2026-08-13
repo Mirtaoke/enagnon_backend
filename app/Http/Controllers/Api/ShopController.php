@@ -221,7 +221,7 @@ class ShopController extends ApiController
         $operation = $shop->operations()->create([
             'client_uuid' => (string) Str::uuid(), 'user_id' => $admin->id,
             'service' => 'other', 'direction' => $data['direction'],
-            'type' => $data['direction'] === 'in' ? 'admin_cash_deposit' : 'admin_cash_withdrawal',
+            'type' => $data['direction'] === 'in' ? 'deposit' : 'withdrawal',
             'amount' => $data['amount'], 'description' => $data['description'], 'occurred_at' => now(),
         ]);
         ActivityLog::create(['user_id' => $admin->id, 'action' => 'cash_adjusted', 'subject_type' => Shop::class, 'subject_id' => $shop->id, 'details' => $operation->toArray(), 'ip_address' => $request->ip()]);
@@ -234,7 +234,7 @@ class ShopController extends ApiController
         abort_unless($admin->role === 'admin', 403, 'Réservé à l’administrateur.');
         $items = \App\Models\Operation::with('shop:id,name')
             ->whereIn('shop_id', $admin->shops()->pluck('id'))
-            ->whereIn('type', ['admin_cash_deposit', 'admin_cash_withdrawal'])
+            ->whereNull('employee_id')->whereIn('type', ['deposit', 'withdrawal', 'admin_cash_deposit', 'admin_cash_withdrawal'])
             ->latest('occurred_at')->limit(200)->get();
         return $this->resource(['movements' => $items]);
     }

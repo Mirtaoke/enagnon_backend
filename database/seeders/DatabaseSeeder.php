@@ -21,7 +21,7 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $admin = User::factory()->create([
-            'name' => 'Admin MultiShop',
+            'name' => 'Admin',
             'username' => 'admin',
             'email' => 'admin@multishop.test',
             'role' => 'admin',
@@ -122,7 +122,7 @@ class DatabaseSeeder extends Seeder
                             'employee_id' => $employee->id, 'user_id' => $user->id,
                             'service' => $service, 'direction' => $direction, 'type' => $type,
                             'amount' => $amount, 'phone' => '0197'.str_pad((string) ($offset * 100 + $index), 6, '0', STR_PAD_LEFT),
-                            'description' => $direction === 'in' ? 'Dépôt client de démonstration' : 'Retrait client de démonstration',
+                            'description' => $direction === 'in' ? 'Dépôt' : 'Retrait',
                             'occurred_at' => $date->copy()->setTime(9 + $index, 15),
                         ]);
                         $direction === 'in' ? $totalIn += $amount : $totalOut += $amount;
@@ -163,7 +163,7 @@ class DatabaseSeeder extends Seeder
                 $report = Report::create([
                     'shop_id' => $shop->id, 'date' => $date->toDateString(),
                     'total_in' => $totalIn, 'total_out' => $totalOut,
-                    'cash_balance' => $balance, 'note' => 'Rapport de démonstration envoyé par '.$user->name.'.',
+                    'cash_balance' => $balance, 'note' => 'Rapport envoyé par '.$user->name.'.',
                 ]);
                 Attendance::create([
                     'employee_id' => $employee->id, 'shop_id' => $shop->id,
