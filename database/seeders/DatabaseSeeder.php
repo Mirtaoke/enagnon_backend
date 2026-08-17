@@ -178,6 +178,6 @@ class DatabaseSeeder extends Seeder
                 ]);
             }
         }
-
+        $this->call(VirtualBalanceSeeder::class);
     }
 }

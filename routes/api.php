@@ -40,6 +40,9 @@ Route::middleware('api')->group(function () {
     Route::post('shops/{shop}/operations', [OperationController::class, 'store']);
     Route::put('shops/{shop}/operations/{operation}', [OperationController::class, 'update']);
     Route::delete('shops/{shop}/operations/{operation}', [OperationController::class, 'destroy']);
+    Route::post('shops/{shop}/operations/{operation}/edit-request', [OperationController::class, 'requestEdit']);
+    Route::get('operation-edit-requests', [OperationController::class, 'editRequests']);
+    Route::put('operation-edit-requests/{editRequest}', [OperationController::class, 'reviewEditRequest']);
     Route::get('shops/{shop}/reports', [ReportController::class, 'index']);
     Route::get('shops/{shop}/reports-export', [ReportController::class, 'export']);
     Route::get('shops/{shop}/reports/{report}', [ReportController::class, 'show']);

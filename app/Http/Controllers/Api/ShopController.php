@@ -121,8 +121,17 @@ class ShopController extends ApiController
             'phone' => 'required|digits:10',
             'description' => 'nullable|string|max:1000',
             'is_active' => 'boolean',
+            'virtual_balances' => 'nullable|array:moov_credit,flooz,momo,mtn_credit,celtiis',
+            'virtual_balances.*' => 'numeric|min:0',
         ]);
-        $shop = Shop::create([...$data, 'owner_id' => $user->id, 'currency' => 'FCFA']);
+        $virtualBalances = $data['virtual_balances'] ?? []; unset($data['virtual_balances']);
+        $initial = [];
+        foreach (['moov_credit', 'flooz', 'momo', 'mtn_credit', 'celtiis'] as $service) {
+            $amount = (float) ($virtualBalances[$service] ?? 0);
+            $initial[$service.'_initial_balance'] = $amount;
+            $initial[$service.'_virtual_balance'] = $amount;
+        }
+        $shop = Shop::create([...$data, ...$initial, 'owner_id' => $user->id, 'currency' => 'FCFA']);
         ActivityLog::create(['user_id' => $user->id, 'action' => 'created', 'subject_type' => Shop::class, 'subject_id' => $shop->id, 'details' => $data, 'ip_address' => $request->ip()]);
         return $this->resource(['shop' => $shop->loadCount('employees')], 201);
     }
@@ -150,9 +159,13 @@ class ShopController extends ApiController
     {
         $user = $this->authOrFail($request);
         abort_unless($user->role === 'admin' && $shop->owner_id === $user->id, 403, 'Réservé à l’administrateur.');
-        abort_if($shop->employees()->exists() || $shop->operations()->exists() || $shop->reports()->exists(), 422, 'Ce point contient encore des membres, opérations ou rapports. Supprime-les avant de supprimer le point.');
-        ActivityLog::create(['user_id' => $user->id, 'action' => 'shop_deleted', 'subject_type' => Shop::class, 'subject_id' => $shop->id, 'details' => ['name' => $shop->name], 'ip_address' => $request->ip()]);
-        $shop->delete();
+        DB::transaction(function () use ($request, $shop, $user) {
+            $memberUserIds = $shop->employees()->whereNotNull('user_id')->pluck('user_id')->filter(fn ($id) => (int) $id !== $user->id);
+            $details = ['name' => $shop->name, 'employees' => $shop->employees()->count(), 'reports' => $shop->reports()->count(), 'operations' => $shop->operations()->count()];
+            ActivityLog::create(['user_id' => $user->id, 'action' => 'shop_deleted', 'subject_type' => Shop::class, 'subject_id' => $shop->id, 'details' => $details, 'ip_address' => $request->ip()]);
+            $shop->delete();
+            \App\Models\User::whereIn('id', $memberUserIds)->where('role', '!=', 'admin')->delete();
+        });
         return response()->noContent();
     }
 
@@ -166,11 +179,17 @@ class ShopController extends ApiController
 
         $todayOperations = $shop->operations()->whereDate('occurred_at', today())->get();
         $groupedOperations = $todayOperations->groupBy('service');
-        $serviceSummary = collect(['other', 'moov_credit', 'flooz', 'momo', 'mtn_credit', 'celtiis'])->mapWithKeys(function ($service) use ($groupedOperations) {
+        $serviceSummary = collect(['other', 'moov_credit', 'flooz', 'momo', 'mtn_credit', 'celtiis'])->mapWithKeys(function ($service) use ($groupedOperations, $todayOperations, $shop) {
             $items = $groupedOperations->get($service, collect());
-            $entries = (float) $items->where('direction', 'in')->sum('amount');
-            $outputs = (float) $items->where('direction', 'out')->sum('amount');
-            return [$service => ['entries' => round($entries, 2), 'outputs' => round($outputs, 2), 'balance' => round($entries - $outputs, 2), 'count' => $items->count()]];
+            if ($service === 'other') {
+                $entries = (float) $items->where('direction', 'in')->sum('amount');
+                $outputs = (float) $items->where('direction', 'out')->sum('amount');
+            } else {
+                $entries = (float) $items->where('direction', 'out')->sum('amount') + (float) $todayOperations->where('type', 'virtual_credit_purchase')->where('network', $service)->sum('amount');
+                $outputs = (float) $items->where('direction', 'in')->sum('amount');
+            }
+            $balance = $service === 'other' ? $entries - $outputs : (float) $shop->{$service.'_virtual_balance'};
+            return [$service => ['entries' => round($entries, 2), 'outputs' => round($outputs, 2), 'balance' => round($balance, 2), 'count' => $items->count(), 'balance_kind' => $service === 'other' ? 'cash' : 'virtual']];
         });
         $todayIn = (float) $todayOperations->where('direction', 'in')->sum('amount');
         $todayOut = (float) $todayOperations->where('direction', 'out')->sum('amount');
@@ -218,6 +237,10 @@ class ShopController extends ApiController
             'direction' => 'required|in:in,out', 'amount' => 'required|numeric|gt:0',
             'description' => 'required|string|max:1000',
         ]);
+        if ($data['direction'] === 'out') {
+            $available = $this->shopCashBalance($shop);
+            abort_if((float) $data['amount'] > $available + 0.001, 422, 'Solde espèces insuffisant. La caisse contient actuellement '.number_format(max(0, $available), 0, ',', ' ').' FCFA.');
+        }
         $operation = $shop->operations()->create([
             'client_uuid' => (string) Str::uuid(), 'user_id' => $admin->id,
             'service' => 'other', 'direction' => $data['direction'],

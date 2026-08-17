@@ -87,11 +87,63 @@ class OperationsWorkflowTest extends TestCase
         $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'nouveau123'])->assertOk();
     }
 
+    public function test_virtual_balance_and_edit_authorization_workflow(): void
+    {
+        [$admin, $seller, $shop] = $this->accounts();
+        $shop->update(['momo_initial_balance' => 100000, 'momo_virtual_balance' => 100000]);
+        $sellerHeaders = ['Authorization' => 'Bearer '.$seller->api_token];
+        $adminHeaders = ['Authorization' => 'Bearer '.$admin->api_token];
+        $this->withHeaders($adminHeaders)->postJson("/api/shops/{$shop->id}/cash-adjustments", ['direction' => 'in', 'amount' => 200000, 'description' => 'Caisse initiale'])->assertCreated();
+
+        $purchase = $this->withHeaders($sellerHeaders)->postJson("/api/shops/{$shop->id}/operations", [
+            'client_uuid' => (string) Str::uuid(), 'service' => 'other', 'network' => 'momo',
+            'direction' => 'out', 'type' => 'virtual_credit_purchase', 'amount' => 50000,
+            'occurred_at' => now()->subMinute()->toIso8601String(),
+        ])->assertCreated()->json('operation');
+        $deposit = $this->withHeaders($sellerHeaders)->postJson("/api/shops/{$shop->id}/operations", [
+            'client_uuid' => (string) Str::uuid(), 'service' => 'momo', 'direction' => 'in',
+            'type' => 'deposit', 'amount' => 20000, 'phone' => '0197000000',
+            'description' => 'Dépôt', 'occurred_at' => now()->toIso8601String(),
+        ])->assertCreated()->assertJsonPath('operation.virtual_balance_after', 130000)->json('operation');
+
+        $this->withHeaders($sellerHeaders)->putJson("/api/shops/{$shop->id}/operations/{$deposit['id']}", [...$deposit, 'amount' => 10000])->assertForbidden();
+        $requestId = $this->withHeaders($sellerHeaders)->postJson("/api/shops/{$shop->id}/operations/{$deposit['id']}/edit-request", ['reason' => 'Montant saisi incorrect'])->assertCreated()->json('request.id');
+        $this->withHeaders($adminHeaders)->putJson("/api/operation-edit-requests/{$requestId}", ['decision' => 'approved'])->assertOk();
+        $this->withHeaders($sellerHeaders)->putJson("/api/shops/{$shop->id}/operations/{$deposit['id']}", [
+            'service' => 'momo', 'direction' => 'in', 'type' => 'deposit', 'amount' => 10000,
+            'phone' => '0197000000', 'description' => 'Dépôt corrigé', 'occurred_at' => now()->toIso8601String(),
+        ])->assertOk()->assertJsonPath('operation.virtual_balance_after', 140000);
+        $this->assertDatabaseHas('shops', ['id' => $shop->id, 'momo_virtual_balance' => 140000]);
+    }
+
+    public function test_operations_are_rejected_when_cash_or_virtual_balance_is_insufficient(): void
+    {
+        [, $seller, $shop] = $this->accounts();
+        $headers = ['Authorization' => 'Bearer '.$seller->api_token];
+        $this->withHeaders($headers)->postJson("/api/shops/{$shop->id}/operations", [
+            'client_uuid' => (string) Str::uuid(), 'service' => 'momo', 'direction' => 'in',
+            'type' => 'deposit', 'amount' => 1000001, 'phone' => '0197000000',
+            'description' => 'Dépôt impossible', 'occurred_at' => now()->toIso8601String(),
+        ])->assertUnprocessable()->assertJsonPath('message', 'Solde virtuel insuffisant pour ce réseau. Il reste 1 000 000 FCFA.');
+        $this->withHeaders($headers)->postJson("/api/shops/{$shop->id}/operations", [
+            'client_uuid' => (string) Str::uuid(), 'service' => 'momo', 'direction' => 'out',
+            'type' => 'withdrawal', 'amount' => 1, 'phone' => '0197000000',
+            'description' => 'Retrait impossible', 'occurred_at' => now()->toIso8601String(),
+        ])->assertUnprocessable()->assertJsonPath('message', 'Solde espèces insuffisant. La caisse contient actuellement 0 FCFA.');
+    }
+
     private function accounts(): array
     {
         $admin = User::factory()->create(['role' => 'admin', 'api_token' => Str::random(60)]);
         $seller = User::factory()->create(['role' => 'seller', 'api_token' => Str::random(60)]);
-        $shop = Shop::create(['name' => 'Point test', 'owner_id' => $admin->id]);
+        $shop = Shop::create([
+            'name' => 'Point test', 'owner_id' => $admin->id,
+            'moov_credit_initial_balance' => 1000000, 'moov_credit_virtual_balance' => 1000000,
+            'flooz_initial_balance' => 1000000, 'flooz_virtual_balance' => 1000000,
+            'momo_initial_balance' => 1000000, 'momo_virtual_balance' => 1000000,
+            'mtn_credit_initial_balance' => 1000000, 'mtn_credit_virtual_balance' => 1000000,
+            'celtiis_initial_balance' => 1000000, 'celtiis_virtual_balance' => 1000000,
+        ]);
         Employee::create(['user_id' => $seller->id, 'shop_id' => $shop->id, 'name' => $seller->name, 'email' => $seller->email]);
         return [$admin, $seller, $shop];
     }
